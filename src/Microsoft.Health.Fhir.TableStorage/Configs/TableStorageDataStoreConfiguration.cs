@@ -3,14 +3,14 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
-namespace Microsoft.Health.Fhir.Web
+namespace Microsoft.Health.Fhir.TableStorage.Configs
 {
-    public static class KnownDataStores
+    public class TableStorageDataStoreConfiguration
     {
-        public const string CosmosDb = "CosmosDb";
+        public string ConnectionString { get; set; }
 
-        public const string SqlServer = "SqlServer";
+        public string TableName { get; set; } = "fhirResources";
 
-        public const string TableStorage = "TableStorage";
+        public bool AllowTableScans { get; set; } = true;
     }
 }
