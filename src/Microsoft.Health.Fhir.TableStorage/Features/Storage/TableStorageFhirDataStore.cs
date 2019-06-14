@@ -5,9 +5,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,10 +25,12 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 {
     public class TableStorageFhirDataStore : IFhirDataStore, IProvideCapability
     {
+        private readonly TableStorageDataStoreConfiguration _config;
         private readonly CloudTable _table;
 
         public TableStorageFhirDataStore(CloudTableClient client, TableStorageDataStoreConfiguration config)
         {
+            _config = config;
             _table = client.GetTableReference(config.TableName);
             _table.CreateIfNotExistsAsync().GetAwaiter().GetResult();
         }
@@ -40,8 +42,9 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
             bool keepHistory,
             CancellationToken cancellationToken)
         {
-            var generator = new SearchIndexEntryGenerator();
-            Dictionary<string, EntityProperty> entries = resource.SearchIndices.SelectMany(x => generator.Generate(x)).ToDictionary(x => x.Key, x => x.Value);
+            var generator = new SearchIndexEntryGenerator(_config);
+
+            IDictionary<string, EntityProperty> entries = generator.Generate(resource.SearchIndices);
 
             FhirTableEntity entity;
 
@@ -53,8 +56,8 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
                 writer.Flush();
 
                 entity = new FhirTableEntity(
-                    resource.ResourceId,
-                    resource.Version ?? Guid.NewGuid().ToString(),
+                    resource.ResourceId ?? Guid.NewGuid().ToString(),
+                    Guid.NewGuid().ToString(),
                     resource.ResourceTypeName,
                     stream.ToArray(),
                     resource.Request.Method,
@@ -65,28 +68,51 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
                     entries);
             }
 
-            TableResult tableResult;
+            TableResult tableResult = null;
             var create = true;
 
-            try
+            if (allowCreate && weakETag == null)
             {
-                // Optimize for insert
-                tableResult = await _table.ExecuteAsync(TableOperation.Insert(entity));
+                try
+                {
+                    // Optimize for insert
+                    tableResult = await _table.ExecuteAsync(TableOperation.Insert(entity));
+                }
+                catch (StorageException ex) when (ex.RequestInformation.HttpStatusCode == 409)
+                {
+                    Debug.WriteLine("Resource {0} already exists", entity.ResourceId);
+                    create = false;
+                }
             }
-            catch (StorageException ex) when (ex.RequestInformation.HttpStatusCode == 409)
+            else
+            {
+                create = false;
+            }
+
+            FhirTableEntity existing = null;
+
+            if (!create)
             {
                 TableOperation retrieveOperation = TableOperation.Retrieve<FhirTableEntity>(resource.ResourceTypeName, FhirTableEntity.CreateId(resource.ResourceId));
                 TableResult existingResult = await _table.ExecuteAsync(retrieveOperation);
-                var existing = (FhirTableEntity)existingResult.Result;
+                existing = (FhirTableEntity)existingResult.Result;
+
+                if (weakETag != null && existing.VersionId != weakETag.VersionId)
+                {
+                    throw new ResourceConflictException(weakETag);
+                }
 
                 existing.IsHistory = true;
                 existing.PartitionKey = $"{existing.ResourceTypeName}_History";
                 existing.RowKey = FhirTableEntity.CreateId(existing.ResourceId, existing.VersionId);
-                create = false;
 
                 // Optimistic concurrency check
                 entity.ETag = existing.ETag;
                 tableResult = await _table.ExecuteAsync(TableOperation.Replace(entity));
+            }
+
+            if (keepHistory && !create)
+            {
                 await _table.ExecuteAsync(TableOperation.Insert(existing));
             }
 
@@ -109,7 +135,8 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
                 retrieveOperation = TableOperation.Retrieve<FhirTableEntity>(key.ResourceType, FhirTableEntity.CreateId(key.Id));
                 result = (FhirTableEntity)(await _table.ExecuteAsync(retrieveOperation)).Result;
 
-                if (!string.IsNullOrEmpty(key.VersionId) && result.VersionId != key.VersionId)
+                if (result == null ||
+                    (!string.IsNullOrEmpty(key.VersionId) && result.VersionId != key.VersionId))
                 {
                     return null;
                 }

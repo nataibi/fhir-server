@@ -6,20 +6,26 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.Linq;
 using EnsureThat;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
+using Microsoft.Health.Fhir.TableStorage.Configs;
 using Microsoft.WindowsAzure.Storage.Table;
 
 namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 {
     internal class SearchIndexEntryGenerator : ISearchValueVisitor
     {
+        private readonly TableStorageDataStoreConfiguration _config;
         private readonly List<IndexEntry> _generatedObjects = new List<IndexEntry>();
         private readonly IDictionary<string, int> _propertyIndex = new Dictionary<string, int>();
+
+        public SearchIndexEntryGenerator(TableStorageDataStoreConfiguration config)
+        {
+            _config = config;
+        }
 
         private SearchIndexEntry Entry { get; set; }
 
@@ -29,17 +35,61 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 
         private IndexEntry CurrentEntry { get; set; }
 
-        public IReadOnlyDictionary<string, EntityProperty> Generate(SearchIndexEntry entry)
+        public IDictionary<string, EntityProperty> Generate(IEnumerable<SearchIndexEntry> searchIndexes)
+        {
+            foreach (var item in searchIndexes)
+            {
+                Add(item);
+            }
+
+            return Generate();
+        }
+
+        private void Add(SearchIndexEntry entry)
         {
             EnsureArg.IsNotNull(entry, nameof(entry));
 
             Entry = entry;
             CurrentEntry = null;
-            _generatedObjects.Clear();
 
             entry.Value.AcceptVisitor(this);
+        }
 
-            return _generatedObjects.SelectMany(x => x.ToProperty()).ToDictionary(x => x.Key, x => x.Value);
+        private IDictionary<string, EntityProperty> Generate()
+        {
+            var groups = _generatedObjects
+                .GroupBy(x => x.Name + string.Join("||", x.Parts.OrderBy(y => y.Key).Select(y => $"{y.Key}:{FormatValue(y.Value)}")));
+
+            if (Debugger.IsAttached)
+            {
+                foreach (var dup in groups.Where(x => x.Count() > 1))
+                {
+                    Debug.WriteLine("Excluding dup ({0}): {1}", dup.Count(), dup.Key);
+                }
+            }
+
+            // TableStorage limit of 256 columns.
+
+            var pocoColumns = typeof(FhirTableEntity)
+                .GetProperties()
+                .Count(x => x.CanWrite);
+
+            var si = groups
+                .SelectMany(x => x.First().ToProperty(GetIndex, _config.MaxIndexCombinationsPerType))
+                .Take(256 - pocoColumns)
+                .ToDictionary(x => x.Key, x => x.Value);
+
+            return si;
+        }
+
+        private static object FormatValue(object y)
+        {
+            if (y is DateTimeOffset dt)
+            {
+                return dt.ToString("o");
+            }
+
+            return y?.ToString();
         }
 
         void ISearchValueVisitor.Visit(CompositeSearchValue composite)
@@ -47,7 +97,6 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
             foreach (IEnumerable<ISearchValue> componentValues in composite.Components.CartesianProduct())
             {
                 int index = 0;
-
                 CreateEntry();
 
                 try
@@ -69,15 +118,8 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 
         void ISearchValueVisitor.Visit(DateTimeSearchValue dateTime)
         {
-            // By default, Json.NET will serialize date time object using format
-            // "yyyy'-'MM'-'dd'T'HH':'mm':'ss.FFFFFFFK". The 'F' format specifier
-            // will not display if the value is 0. For example, 2018-01-01T00:00:00.0000000+00:00
-            // is formatted as 2018-01-01T00:00:00+00:00 but 2018-01-01T00:00:00.9999999+00:00 is
-            // formatted as 2018-01-01T00:00:00.9999999+00:00. Because Cosmos DB only supports range index
-            // with string or number data type, the comparison does not work correctly in some cases.
-            // Output the date time using 'o' to make sure the fraction is always generated.
-            AddProperty(SearchValueConstants.DateTimeStartName, dateTime.Start.ToString("o", CultureInfo.InvariantCulture));
-            AddProperty(SearchValueConstants.DateTimeEndName, dateTime.End.ToString("o", CultureInfo.InvariantCulture));
+            AddProperty(SearchValueConstants.DateTimeStartName, dateTime.Start);
+            AddProperty(SearchValueConstants.DateTimeEndName, dateTime.End);
         }
 
         void ISearchValueVisitor.Visit(NumberSearchValue number)
@@ -108,16 +150,16 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
         void ISearchValueVisitor.Visit(ReferenceSearchValue reference)
         {
             AddPropertyIfNotNull(SearchValueConstants.ReferenceBaseUriName, reference.BaseUri?.ToString());
-            AddPropertyIfNotNull(SearchValueConstants.ReferenceResourceTypeName, reference.ResourceType?.ToString());
+            AddPropertyIfNotNull(SearchValueConstants.ReferenceResourceTypeName, reference.ResourceType);
             AddProperty(SearchValueConstants.ReferenceResourceIdName, reference.ResourceId);
         }
 
         void ISearchValueVisitor.Visit(StringSearchValue s)
         {
-            ////if (!IsCompositeComponent)
-            ////{
-            ////    AddProperty(SearchValueConstants.StringName, s.String);
-            ////}
+            if (!IsCompositeComponent)
+            {
+                AddProperty(SearchValueConstants.StringName, s.String);
+            }
 
             AddProperty(SearchValueConstants.NormalizedStringName, s.String.ToUpperInvariant());
         }
@@ -127,11 +169,11 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
             AddPropertyIfNotNull(SearchValueConstants.SystemName, token.System);
             AddPropertyIfNotNull(SearchValueConstants.CodeName, token.Code);
 
-            ////if (!IsCompositeComponent)
-            ////{
-            ////    // Since text is case-insensitive search, it will always be normalized.
-            ////    AddPropertyIfNotNull(SearchValueConstants.NormalizedTextName, token.Text?.ToUpperInvariant());
-            ////}
+            if (!IsCompositeComponent)
+            {
+                // Since text is case-insensitive search, it will always be normalized.
+                AddPropertyIfNotNull(SearchValueConstants.NormalizedTextName, token.Text?.ToUpperInvariant());
+            }
         }
 
         void ISearchValueVisitor.Visit(UriSearchValue uri)
@@ -141,7 +183,7 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 
         private void CreateEntry()
         {
-            CurrentEntry = new IndexEntry($"{Entry.SearchParameter.Name}{GetIndex(Entry.SearchParameter.Name)}");
+            CurrentEntry = new IndexEntry(Entry.SearchParameter.Name);
 
             _generatedObjects.Add(CurrentEntry);
         }
@@ -153,14 +195,13 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
                 CreateEntry();
             }
 
-            if (!CurrentEntry.Parts.ContainsKey(name))
+            var cn = name;
+            if (IsCompositeComponent)
             {
-                CurrentEntry.Parts.Add(name, value);
+                cn = $"c{Index}_{name}";
             }
-            else
-            {
-                CurrentEntry.Parts[name] = $"{CurrentEntry.Parts[name]}|{value}";
-            }
+
+            CurrentEntry.Parts.Add(cn, value);
         }
 
         private void AddPropertyIfNotNull(string name, string value)
@@ -193,15 +234,36 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 
             public string Name { get; }
 
-            public IEnumerable<KeyValuePair<string, EntityProperty>> ToProperty()
+            public IEnumerable<KeyValuePair<string, EntityProperty>> ToProperty(Func<string, int> nameIndex, int maxIndexCombinationsPerType)
             {
+                int index = nameIndex(Name);
+
+                if (index > maxIndexCombinationsPerType)
+                {
+                    yield break;
+                }
+
                 foreach (var props in Parts)
                 {
-                    string name = $"s_{Name}_{props.Key}";
+                    string name = $"s_{Name}{index}_{props.Key}";
+
                     Debug.WriteLine($"Adding index: {name}={props.Value}");
 
-                    yield return new KeyValuePair<string, EntityProperty>(name, EntityProperty.CreateEntityPropertyFromObject(props.Value));
+                    yield return new KeyValuePair<string, EntityProperty>(
+                        name,
+                        EntityProperty.CreateEntityPropertyFromObject(MapEntityValue(props)));
                 }
+            }
+
+            private static object MapEntityValue(KeyValuePair<string, object> props)
+            {
+                if (props.Value is decimal)
+                {
+                    // TableStorage does not support decimal
+                    return (double)(decimal)props.Value;
+                }
+
+                return props.Value;
             }
         }
     }

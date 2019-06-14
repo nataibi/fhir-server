@@ -1,24 +1,36 @@
 {
-  "profiles": {
-    "CosmosDb": {
-      "commandName": "Project",
-      "environmentVariables": {
-        "TestAuthEnvironment:FilePath": "..//..//testauthenvironment.json",
-        "DataStore": "CosmosDb",
-        "ASPNETCORE_ENVIRONMENT": "development"
-      },
-      "applicationUrl": "https://localhost:44348/"
-    },
-    "SqlServer": {
-      "commandName": "Project",
-      "environmentVariables": {
-        "SqlServer:ConnectionString": "server=(local);Initial Catalog=FHIR_STU3;Integrated Security=true",
-        "SqlServer:Initialize": "true",
-        "TestAuthEnvironment:FilePath": "..//..//testauthenvironment.json",
-        "DataStore": "SqlServer",
-        "ASPNETCORE_ENVIRONMENT": "development"
-      },
-      "applicationUrl": "https://localhost:44348/"
+    "profiles": {
+        "CosmosDb": {
+            "commandName": "Project",
+            "environmentVariables": {
+                "TestAuthEnvironment:FilePath": "..//..//testauthenvironment.json",
+                "DataStore": "CosmosDb",
+                "ASPNETCORE_ENVIRONMENT": "development"
+            },
+            "applicationUrl": "https://localhost:44348/"
+        },
+        "SqlServer": {
+            "commandName": "Project",
+            "environmentVariables": {
+                "SqlServer:ConnectionString": "server=(local);Initial Catalog=FHIR_STU3;Integrated Security=true",
+                "SqlServer:Initialize": "true",
+                "TestAuthEnvironment:FilePath": "..//..//testauthenvironment.json",
+                "DataStore": "SqlServer",
+                "ASPNETCORE_ENVIRONMENT": "development"
+            },
+            "applicationUrl": "https://localhost:44348/"
+        },
+        "TableStorage": {
+            "commandName": "Project",
+            "launchBrowser": true,
+            "environmentVariables": {
+                "TableStorage:ConnectionString": "UseDevelopmentStorage=true",
+                "TableStorage:TableName": "fhirStu3",
+                "TestAuthEnvironment:FilePath": "..//..//testauthenvironment.json",
+                "DataStore": "TableStorage",
+                "ASPNETCORE_ENVIRONMENT": "development"
+            },
+            "applicationUrl": "https://localhost:44348/"
+        }
     }
-  }
 }

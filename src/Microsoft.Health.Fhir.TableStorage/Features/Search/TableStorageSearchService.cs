@@ -42,60 +42,49 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
             SearchOptions searchOptions,
             CancellationToken cancellationToken)
         {
-            try
+            var filters = new StringBuilder();
+            filters.Append(TableQuery.GenerateFilterConditionForBool(nameof(KnownResourceWrapperProperties.IsDeleted), QueryComparisons.Equal, false));
+
+            var query = new TableQuery<FhirTableEntity>();
+
+            var expressionQueryBuilder = new ExpressionQueryBuilder(filters, _config);
+
+            if (searchOptions.Expression != null)
             {
-                var filters = new StringBuilder();
-
-                filters.Append("(");
-                filters.Append(TableQuery.GenerateFilterConditionForBool(nameof(KnownResourceWrapperProperties.IsDeleted), QueryComparisons.Equal, false));
-                filters.Append(")");
-
-                var query = new TableQuery<FhirTableEntity>();
-
-                var expressionQueryBuilder = new ExpressionQueryBuilder(filters);
-
-                if (searchOptions.Expression != null)
-                {
-                    filters.Append(" and ");
-                    searchOptions.Expression.AcceptVisitor(expressionQueryBuilder, default);
-                }
-
-                Debug.WriteLine(filters);
-
-                query.Where(filters.ToString());
-
-                query = query.Take(searchOptions.MaxItemCount);
-
-                if (searchOptions.CountOnly)
-                {
-                    var count = await RowCount(query);
-
-                    return new SearchResult(count, searchOptions.UnsupportedSearchParams);
-                }
-                else
-                {
-                    TableContinuationToken ct = GetContinuationToken(searchOptions);
-
-                    TableQuerySegment<FhirTableEntity> results =
-                        await _table.ExecuteQuerySegmentedAsync(query, ct);
-
-                    while (_config.AllowTableScans && results.ContinuationToken != null && results.Results.Count == 0)
-                    {
-                        // This query returns no results and a continuation token, likely means its doing
-                        // a full table scan, which will be slow
-                        results = await _table.ExecuteQuerySegmentedAsync(query, results.ContinuationToken);
-                    }
-
-                    return new SearchResult(
-                        results.Results.Select(TableStorageFhirDataStore.ToResourceWrapper),
-                        searchOptions.UnsupportedSearchParams,
-                        SerializeContinuationToken(results));
-                }
+                filters.Append(" and ");
+                searchOptions.Expression.AcceptVisitor(expressionQueryBuilder, default);
             }
-            catch (Exception ex)
+
+            Debug.WriteLine(filters);
+
+            query.Where(filters.ToString());
+
+            query = query.Take(searchOptions.MaxItemCount);
+
+            if (searchOptions.CountOnly)
             {
-                Console.WriteLine(ex.ToString());
-                throw;
+                var count = await RowCount(query);
+
+                return new SearchResult(count, searchOptions.UnsupportedSearchParams);
+            }
+            else
+            {
+                TableContinuationToken ct = GetContinuationToken(searchOptions);
+
+                TableQuerySegment<FhirTableEntity> results =
+                    await _table.ExecuteQuerySegmentedAsync(query, ct);
+
+                while (_config.AllowTableScans && results.ContinuationToken != null && results.Results.Count == 0)
+                {
+                    // This query returns no results and a continuation token, likely means its doing
+                    // a full table scan, which will be slow
+                    results = await _table.ExecuteQuerySegmentedAsync(query, results.ContinuationToken);
+                }
+
+                return new SearchResult(
+                    results.Results.Select(TableStorageFhirDataStore.ToResourceWrapper),
+                    searchOptions.UnsupportedSearchParams,
+                    SerializeContinuationToken(results));
             }
         }
 
@@ -105,7 +94,7 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
         {
             var filters = new StringBuilder();
             var query = new TableQuery<FhirTableEntity>();
-            var expressionQueryBuilder = new ExpressionQueryBuilder(filters);
+            var expressionQueryBuilder = new ExpressionQueryBuilder(filters, _config);
 
             if (searchOptions.Expression != null)
             {

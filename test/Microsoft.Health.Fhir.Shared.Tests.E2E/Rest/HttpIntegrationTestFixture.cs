@@ -60,6 +60,9 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
                 case DataStore.SqlServer:
                     environmentUrl = Environment.GetEnvironmentVariable($"TestEnvironmentUrl{Constants.TestEnvironmentVariableVersionSuffix}_Sql");
                     break;
+                case DataStore.TableStorage:
+                    environmentUrl = Environment.GetEnvironmentVariable($"TestEnvironmentUrl{Constants.TestEnvironmentVariableVersionSuffix}_TableStorage");
+                    break;
             }
 
             if (string.IsNullOrWhiteSpace(environmentUrl))

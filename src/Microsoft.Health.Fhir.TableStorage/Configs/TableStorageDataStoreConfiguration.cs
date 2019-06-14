@@ -12,5 +12,14 @@ namespace Microsoft.Health.Fhir.TableStorage.Configs
         public string TableName { get; set; } = "fhirResources";
 
         public bool AllowTableScans { get; set; } = true;
+
+        /// <summary>
+        /// For example if there are 10 string fields in a Patient
+        /// resource the first 5 will be indexed and searchable.
+        ///
+        /// There is a max of 256 columns in TableStorage, this can ensure
+        /// other types are also indexed.
+        /// </summary>
+        public int MaxIndexCombinationsPerType { get; set; } = 10;
     }
 }

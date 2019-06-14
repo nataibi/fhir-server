@@ -10,6 +10,7 @@ using System.Text;
 using EnsureThat;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.TableStorage.Configs;
 using Microsoft.Health.Fhir.TableStorage.Features.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
 
@@ -18,8 +19,9 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
     internal class ExpressionQueryBuilder : IExpressionVisitorWithInitialContext<ExpressionQueryBuilder.Context, object>
     {
         private readonly StringBuilder _tableQuery;
+        private readonly TableStorageDataStoreConfiguration _config;
 
-        private static readonly Dictionary<FieldName, string> FieldNameMapping = new Dictionary<FieldName, string>
+        private static readonly Dictionary<FieldName, string> FieldNameMapping = new Dictionary<FieldName, string>()
         {
             { FieldName.DateTimeEnd, SearchValueConstants.DateTimeEndName },
             { FieldName.DateTimeStart, SearchValueConstants.DateTimeStartName },
@@ -31,16 +33,17 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
             { FieldName.ReferenceBaseUri, SearchValueConstants.ReferenceBaseUriName },
             { FieldName.ReferenceResourceId, SearchValueConstants.ReferenceResourceIdName },
             { FieldName.ReferenceResourceType, SearchValueConstants.ReferenceResourceTypeName },
-            { FieldName.String, SearchValueConstants.NormalizedStringName },
+            { FieldName.String, SearchValueConstants.StringName },
             { FieldName.TokenCode, SearchValueConstants.CodeName },
             { FieldName.TokenSystem, SearchValueConstants.SystemName },
             { FieldName.TokenText, SearchValueConstants.TextName },
             { FieldName.Uri, SearchValueConstants.UriName },
         };
 
-        public ExpressionQueryBuilder(StringBuilder tableQuery)
+        public ExpressionQueryBuilder(StringBuilder tableQuery, TableStorageDataStoreConfiguration config)
         {
             _tableQuery = tableQuery;
+            _config = config;
         }
 
         Context IExpressionVisitorWithInitialContext<Context, object>.InitialContext => default;
@@ -69,7 +72,11 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
 
         public object VisitBinary(BinaryExpression expression, Context context)
         {
-            VisitBinary(GetFieldName(expression, context), expression.BinaryOperator, expression.Value, context);
+            VisitBinary(
+                GetFieldName(expression, context),
+                expression.BinaryOperator,
+                expression.Value,
+                context);
 
             return null;
         }
@@ -78,29 +85,49 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
         {
             string generateFilterCondition;
 
+            string propertyName = fieldName ?? context.FieldNameOverride;
+
             switch ((value?.GetType() ?? typeof(string)).Name)
             {
                 case nameof(DateTimeOffset):
                     generateFilterCondition = TableQuery.GenerateFilterConditionForDate(
-                        fieldName ?? $"{context.FieldNameOverride}",
+                        propertyName,
                         GetMappedValue(op),
                         (DateTimeOffset)value);
                     break;
                 case nameof(Double):
                     generateFilterCondition = TableQuery.GenerateFilterConditionForDouble(
-                        fieldName ?? $"{context.FieldNameOverride}",
+                        propertyName,
                         GetMappedValue(op),
                         (double)value);
                     break;
+                case nameof(Decimal):
+                    generateFilterCondition = TableQuery.GenerateFilterConditionForDouble(
+                        propertyName,
+                        GetMappedValue(op),
+                        (double)(decimal)value);
+                    break;
+                case nameof(Boolean):
+                    generateFilterCondition = TableQuery.GenerateFilterConditionForBool(
+                        propertyName,
+                        GetMappedValue(op),
+                        (bool)value);
+                    break;
+                case nameof(Int32):
+                    generateFilterCondition = TableQuery.GenerateFilterConditionForInt(
+                        propertyName,
+                        GetMappedValue(op),
+                        (int)value);
+                    break;
                 default:
                     generateFilterCondition = TableQuery.GenerateFilterCondition(
-                        fieldName ?? $"{context.FieldNameOverride}",
+                        propertyName,
                         GetMappedValue(op),
                         value?.ToString());
                     break;
             }
 
-            AddFilter(context, generateFilterCondition);
+            AddFilter(generateFilterCondition);
         }
 
         private static string GetMappedValue(BinaryOperator expressionBinaryOperator)
@@ -148,6 +175,7 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
         {
             var newContext = context.WithMultiaryOperation(expression.MultiaryOperation);
 
+            _tableQuery.Append("(");
             for (var index = 0; index < expression.Expressions.Count; index++)
             {
                 var e = expression.Expressions[index];
@@ -159,19 +187,18 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
                 }
             }
 
+            _tableQuery.Append(")");
+
             return context;
         }
 
         public object VisitString(StringExpression expression, Context context)
         {
-            string fieldName = GetFieldName(expression, context);
+            string fieldName = GetFieldName(expression, context, expression.IgnoreCase);
 
-            string value = expression.IgnoreCase ? expression.Value.ToUpperInvariant() : expression.Value;
-
-            if (!expression.IgnoreCase && expression.StringOperator != StringOperator.Equals)
-            {
-                throw new NotImplementedException();
-            }
+            string value = expression.IgnoreCase
+                ? expression.Value.ToUpperInvariant()
+                : expression.Value;
 
             if (context.IsHistory && context.IsPartitionKey)
             {
@@ -181,16 +208,17 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
                 partitionBuilder.Append(" or ");
                 partitionBuilder.Append(TableQuery.GenerateFilterCondition(fieldName, QueryComparisons.Equal, $"{value}_History"));
                 partitionBuilder.Append(")");
-                AddFilter(context, partitionBuilder.ToString());
+                AddFilter(partitionBuilder.ToString());
             }
             else
             {
                 switch (expression.StringOperator)
                 {
-                    case StringOperator.Equals:
                     case StringOperator.StartsWith:
-                        AddFilter(context, TableQuery.GenerateFilterCondition(fieldName, QueryComparisons.Equal, value));
-
+                        AddFilter(GetStartsWithFilter(fieldName, value));
+                        break;
+                    case StringOperator.Equals:
+                        AddFilter(TableQuery.GenerateFilterCondition(fieldName, QueryComparisons.Equal, value));
                         break;
                     default:
                         throw new NotImplementedException();
@@ -200,13 +228,23 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
             return null;
         }
 
-        private void AddFilter(Context context, string filter)
+        private void AddFilter(string filter)
         {
-            Debug.WriteLine(context);
-
-            _tableQuery.Append("(");
             _tableQuery.Append(filter);
-            _tableQuery.Append(")");
+        }
+
+        private static string GetStartsWithFilter(string columnName, string startsWith)
+        {
+            var length = startsWith.Length - 1;
+            var nextChar = startsWith[length] + 1;
+
+            var startWithEnd = startsWith.Substring(0, length) + (char)nextChar;
+            var filter = TableQuery.CombineFilters(
+                TableQuery.GenerateFilterCondition(columnName, QueryComparisons.GreaterThanOrEqual, startsWith),
+                TableOperators.And,
+                TableQuery.GenerateFilterCondition(columnName, QueryComparisons.LessThan, startWithEnd));
+
+            return filter;
         }
 
         public object VisitCompartment(CompartmentSearchExpression expression, Context context)
@@ -214,7 +252,7 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
             throw new SearchOperationNotSupportedException("Compartment search is not supported.");
         }
 
-        private string GetFieldName(IFieldExpression fieldExpression, Context state)
+        private string GetFieldName(IFieldExpression fieldExpression, Context state, bool expressionIgnoreCase = false)
         {
             if (state.FieldNameOverride != null)
             {
@@ -223,12 +261,17 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
 
             string fieldNameInString = GetMappedValue(FieldNameMapping, fieldExpression.FieldName);
 
+            if (expressionIgnoreCase)
+            {
+                fieldNameInString = $"{SearchValueConstants.NormalizedPrefix}{fieldNameInString}";
+            }
+
             if (fieldExpression.ComponentIndex == null)
             {
                 return $"{state.FieldNamePrefix}{fieldNameInString}";
             }
 
-            return $"s_{fieldNameInString}_{fieldExpression.ComponentIndex.Value}";
+            return $"{state.FieldNamePrefix}c{fieldExpression.ComponentIndex.Value}_{fieldNameInString}";
         }
 
         private static string GetMappedValue<T>(Dictionary<T, string> mapping, T key)
@@ -249,33 +292,21 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Search
         {
             EnsureArg.IsNotNull(parameterName, nameof(parameterName));
 
-            Trace.WriteLine($"{parameterName}:{negate}");
-
             if (negate)
             {
                 _tableQuery.Append(" not ");
             }
 
-            var currentContext = context;
-
             string variable = parameterName.Replace("-", string.Empty, StringComparison.Ordinal);
 
             _tableQuery.Append("(");
-            var maxFields = 3;
+            var maxFields = _config.MaxIndexCombinationsPerType;
 
             for (int i = 0; i < maxFields; i++)
             {
                 string namePrefix = context.FieldNameOverride ?? $"s_{variable}{i}_";
 
-                if (expression is IFieldExpression fieldExpression)
-                {
-                    string fieldName = GetMappedValue(FieldNameMapping, fieldExpression.FieldName);
-                    currentContext = context.WithNameOverride($"{namePrefix}{fieldName}");
-                }
-                else
-                {
-                    currentContext = context.WithNamePrefix(namePrefix);
-                }
+                Context currentContext = context.WithNamePrefix(namePrefix);
 
                 if (expression != null)
                 {

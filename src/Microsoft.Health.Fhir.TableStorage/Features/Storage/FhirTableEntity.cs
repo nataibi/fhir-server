@@ -13,6 +13,8 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 {
     public class FhirTableEntity : TableEntity
     {
+        private const string HistorySuffix = "_History";
+
         public FhirTableEntity()
         {
             Properties = new Dictionary<string, EntityProperty>();
@@ -30,20 +32,17 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
             bool isHistory,
             IDictionary<string, EntityProperty> searchIndicies)
         {
-            // PartitionKey = ResourceTypeName
-            // RowKey = {ResourceId_Version}
+            PartitionKey = IsHistory ? $"{resourceTypeName}{HistorySuffix}" : resourceTypeName;
+            RowKey = IsHistory ? CreateId(resourceId, versionId) : CreateId(resourceId);
 
             ResourceId = resourceId;
             VersionId = versionId;
-            PartitionKey = resourceTypeName;
             RawResourceData = rawResourceData;
             ResourceRequestMethod = resourceRequestMethod;
             ResourceRequestUri = resourceRequestUri;
             LastModified = lastModified;
             IsDeleted = isDeleted;
             IsHistory = isHistory;
-
-            RowKey = IsHistory ? CreateId(resourceId, versionId) : CreateId(resourceId);
             Properties = searchIndicies;
         }
 
@@ -53,7 +52,7 @@ namespace Microsoft.Health.Fhir.TableStorage.Features.Storage
 
         public string VersionId { get; set; }
 
-        public string ResourceTypeName => PartitionKey?.Replace("_History", string.Empty, StringComparison.Ordinal);
+        public string ResourceTypeName => PartitionKey?.Replace(HistorySuffix, string.Empty, StringComparison.Ordinal);
 
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1819: Properties should not return arrays", Justification = "DTO Entity.")]
         public byte[] RawResourceData { get; set; }
