@@ -149,9 +149,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                     // Best effort to delete the secret. If it fails to delete, then move on.
                     await _secretStore.DeleteSecretAsync(_exportJobRecord.SecretName, cancellationToken);
                 }
-                catch (Exception ex)
+                catch (SecretStoreException sse)
                 {
-                    _logger.LogWarning(ex, "Failed to delete the secret.");
+                    _logger.LogWarning(sse, "Failed to delete the secret.");
                 }
             }
             catch (JobConflictException)
@@ -162,12 +162,27 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                 // TODO: We will want to get the latest and merge the results without updating the status.
                 return;
             }
+            catch (SecretStoreException sse)
+            {
+                _logger.LogError(sse, "Secret store error. The job will be marked as failed.");
+
+                _exportJobRecord.FailureReason = sse.Message;
+                await UpdateAndCommitJobStatus(OperationStatus.Failed, updateEndTimestamp: true, cancellationToken);
+            }
+            catch (DestinationConnectionException dce)
+            {
+                _logger.LogError(dce, "Can't connect to destination. The job will be marked as failed.");
+
+                _exportJobRecord.FailureReason = dce.Message;
+                await UpdateAndCommitJobStatus(OperationStatus.Failed, updateEndTimestamp: true, cancellationToken);
+            }
             catch (Exception ex)
             {
                 // The job has encountered an error it cannot recover from.
                 // Try to update the job to failed state.
                 _logger.LogError(ex, "Encountered an unhandled exception. The job will be marked as failed.");
 
+                _exportJobRecord.FailureReason = "Unknown Error";
                 await UpdateAndCommitJobStatus(OperationStatus.Failed, updateEndTimestamp: true, cancellationToken);
             }
         }

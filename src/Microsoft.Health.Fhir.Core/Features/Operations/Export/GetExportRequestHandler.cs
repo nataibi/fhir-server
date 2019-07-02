@@ -45,6 +45,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
 
                 exportResponse = new GetExportResponse(HttpStatusCode.OK, jobResult);
             }
+            else if (outcome.JobRecord.Status == OperationStatus.Failed)
+            {
+                exportResponse = new GetExportResponse(HttpStatusCode.InternalServerError, outcome.JobRecord.FailureReason);
+            }
             else
             {
                 exportResponse = new GetExportResponse(HttpStatusCode.Accepted);

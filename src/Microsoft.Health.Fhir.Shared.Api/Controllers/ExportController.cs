@@ -130,15 +130,19 @@ namespace Microsoft.Health.Fhir.Api.Controllers
         [AuditEventType(AuditEventSubType.Export)]
         public async Task<IActionResult> GetExportStatusById(string id)
         {
-            var getExportResult = await _mediator.GetExportStatusAsync(_fhirRequestContextAccessor.FhirRequestContext.Uri, id);
+            GetExportResponse getExportResponse = await _mediator.GetExportStatusAsync(_fhirRequestContextAccessor.FhirRequestContext.Uri, id);
 
             // If the job is complete, we need to return 200 along the completed data to the client.
             // Else we need to return 202.
             ExportResult exportActionResult;
-            if (getExportResult.StatusCode == HttpStatusCode.OK)
+            if (getExportResponse.StatusCode == HttpStatusCode.OK)
             {
-                exportActionResult = ExportResult.Ok(getExportResult.JobResult);
+                exportActionResult = ExportResult.Ok(getExportResponse.JobResult);
                 exportActionResult.SetContentTypeHeader(OperationsConstants.ExportContentTypeHeaderValue);
+            }
+            else if (getExportResponse.StatusCode == HttpStatusCode.InternalServerError)
+            {
+                throw new OperationFailedException(string.Format(Resources.OperationFailed, OperationsConstants.Export, getExportResponse.FailureReason));
             }
             else
             {
